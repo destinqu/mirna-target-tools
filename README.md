@@ -2,6 +2,28 @@
 
 A streamlined bioinformatics toolkit for **miRNA target prediction, functional annotation, conservation analysis, and regulatory network construction** — from raw miRNA sequences to a Cytoscape-ready network in one pipeline.
 
+## Install
+
+OpenClaw installs a skill straight from this repository:
+
+```bash
+openclaw skills install git:https://github.com/destinqu/mirna-target-tools
+```
+
+<details>
+<summary>Other ways to install</summary>
+
+```bash
+# clone into a skills directory (any agent workspace's skills/ works)
+git clone https://github.com/destinqu/mirna-target-tools ~/.openclaw/skills/mirna-target-tools
+```
+
+Or copy the folder manually into `~/.openclaw/skills/mirna-target-tools/`.
+
+</details>
+
+`SKILL.md` sits at the repository root, so all three forms resolve without a subdirectory.
+
 ## What it does
 
 - **Target prediction** — run TargetScan and miRanda to predict miRNA target genes
