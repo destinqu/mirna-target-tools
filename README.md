@@ -2,28 +2,6 @@
 
 A complete bioinformatics toolkit for **miRNA target analysis** — from raw miRNA sequences to a Cytoscape-ready network: TargetScan/miRanda workflows, whole-transcriptome seed-based prediction (built-in species or your own genome/transcriptome), gene annotation, GO/KEGG enrichment with Benjamini–Hochberg FDR, seed-region conservation analysis, and publication-quality figures drawn with **R + ggplot2**.
 
-## Install
-
-OpenClaw installs a skill straight from this repository:
-
-```bash
-openclaw skills install git:https://github.com/destinqu/mirna-target-tools
-```
-
-<details>
-<summary>Other ways to install</summary>
-
-```bash
-# clone into a skills directory (any agent workspace's skills/ works)
-git clone https://github.com/destinqu/mirna-target-tools ~/.openclaw/skills/mirna-target-tools
-```
-
-Or copy the folder manually into `~/.openclaw/skills/mirna-target-tools/`.
-
-</details>
-
-`SKILL.md` sits at the repository root, so all three forms resolve without a subdirectory.
-
 ## Requirements
 
 - **Real miRanda 3.3a is required by default** (`--method auto` → hybrid;
@@ -101,7 +79,7 @@ The toolkit is designed to run on untrusted reference files and user tables:
 - external tools are invoked with argv lists (never a shell)
 - downloads are HTTPS-only, streamed, size-capped and written atomically
 - `--prefix` is validated so outputs cannot escape `--outdir`
-- the installer never runs `sudo`; source builds require a SHA-256 pin
+- the installer never runs `sudo` and has no source-build fallback; miRanda 3.3a is installed from conda
 - malformed rows are skipped instead of crashing
 - annotation exports neutralise spreadsheet formulas by default
 

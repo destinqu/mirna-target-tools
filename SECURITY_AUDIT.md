@@ -1,4 +1,4 @@
-# Security Audit — mirna-target-tools 3.2.1
+# Security Audit — mirna-target-tools 3.2.2
 
 Date: 2026-11-25
 Scope: all Python/shell/R entry points in `scripts/`, with focus on command
@@ -18,7 +18,7 @@ supply-chain/reference-integrity and deployment-environment risks, listed below.
 | 1 | High | R package checks interpolated strings into `Rscript -e` | Constant R expression + package names passed as `argv`; `--vanilla` everywhere |
 | 2 | High | `--prefix` could contain `../` or separators and write outside `--outdir` | `safe_name()` / `safe_prefix()` reject separators, `..`, NUL, tab, newline |
 | 3 | High | Unbounded HTTP reads (memory exhaustion / oversized reference files) | HTTPS-only, `Content-Length` + streaming byte cap, atomic replace, `.part` cleanup, FASTA sanity check |
-| 4 | High | Source-build installer used `sudo`, fixed `/tmp` paths and unverified tarballs | No sudo, private `mktemp -d`, tar path-traversal check, SHA-256 pin or `--allow-unverified`, installs to `~/.local` |
+| 4 | High | Installer could build third-party source and originally used `sudo` | No sudo, no source-build fallback; real miRanda 3.3a is installed from bioconda and version-checked |
 | 5 | Medium | Silent fallback from real miRanda to seed/RNAhybrid | Real miRanda 3.3a is required by `--method auto`; explicit `seed`/`rnahybrid` opt-outs only |
 | 6 | Medium | miRanda invoked with invalid `-score` flag; `>>` summary duplicated hits | `-sc`; summary lines skipped; parser tested against miRanda 3.3a |
 | 7 | Medium | `merge_targets.py` crashed on NaN/empty gene fields | NaN-safe cell access + TSV control-character cleanup |
@@ -68,7 +68,7 @@ supply-chain/reference-integrity and deployment-environment risks, listed below.
 ## Verified controls
 
 - No `shell=True`, `os.system`, `eval`, `pickle` or disabled TLS verification.
-- All external programs use argv lists.
+- All external programs use argv lists; the installer has no source-build path.
 - Downloads are HTTPS-only, capped and atomically written.
 - `--prefix` traversal guards tested for stage 1, refinement, annotation and
   conservation.

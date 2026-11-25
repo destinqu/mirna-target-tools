@@ -1,6 +1,6 @@
 ---
 name: mirna-target-tools
-version: 3.2.1
+version: 3.2.2
 description: >-
   End-to-end miRNA target analysis from miRNA sequences alone: whole-transcriptome
   target prediction across built-in species (human, mouse, rat, sheep, goat, cow,
@@ -262,7 +262,7 @@ Practical notes:
 ## Security model
 
 These scripts treat reference files, downloaded archives and user tables as
-untrusted input. The hardening that ships with 3.2.0+:
+untrusted input. The hardening that ships with 3.2.2+:
 
 - **No shell execution** — every external program (miRanda, RNAhybrid, Rscript,
   TargetScan) is launched with an argv list; no `shell=True`, `os.system` or
@@ -273,11 +273,10 @@ untrusted input. The hardening that ships with 3.2.0+:
   (`MIRNA_MAX_DOWNLOAD_MB`, default 4096), written atomically with
   `os.replace`, and sanity-checked (FASTA must start with `>`). Aborted
   downloads are removed.
-- **Archive builds** — `install_dependencies.sh` never runs `sudo`, downloads
-  into a private `mktemp -d`, rejects absolute/`..` tar members, refuses an
-  unverified tarball unless its SHA-256 is supplied (`--sha256` /
-  `MIRNA_SHA256`) or `--allow-unverified` is passed, and installs into
-  `~/.local`.
+- **Installation** — `install_dependencies.sh` never runs `sudo` and has no
+  source-build fallback: the real miRanda 3.3a is installed from bioconda
+  (`miranda=3.3a`), and `install_miranda_conda.sh --check` verifies the binary.
+  Python packages go to the user site and R packages to `~/R/library`.
 - **Path traversal** — `--prefix` values are validated (no `/`, `\`, `..`, NUL,
   tab or newline), so outputs cannot escape `--outdir`.
 - **Temporary files** — every `mkdtemp` is removed in a `finally` block.
