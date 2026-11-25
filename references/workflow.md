@@ -1,8 +1,8 @@
-# 标准miRNA靶基因预测 + 注释分析流程
+# Standard miRNA target prediction + annotation workflow
 
-## 完整工作流步骤
+## Full workflow steps
 
-### 1. 准备输入文件
+### 1. Prepare input files
 
 **Input 1: miRNA list (`mirna_list.txt`)**
 ```
@@ -19,21 +19,25 @@ UAGCUUAUCAGACUGAUGAUGA
 UUAAUGCUAAUCGUGAUAGGGGU
 ```
 
-**Input 3: 3'UTR FASTA (`3utr.fa`)**  
-可以从Ensembl/UCSC下载。
+**Input 3: 3'UTR FASTA (`3utr.fa`)**
+Downloadable from Ensembl/UCSC.
 
-### 2. 检查环境
+### 2. Install real miRanda 3.3a and check the environment
+
+Real miRanda 3.3a is required for the default hybrid/refinement workflow:
 
 ```bash
+bash ~/.openclaw/skills/mirna-target-tools/scripts/install_miranda_conda.sh
+bash ~/.openclaw/skills/mirna-target-tools/scripts/install_miranda_conda.sh --check
 python3 ~/.openclaw/skills/mirna-target-tools/scripts/check_env.py
 ```
 
-如果有缺失，运行安装脚本：
+If other optional dependencies are missing:
 ```bash
 bash ~/.openclaw/skills/mirna-target-tools/scripts/install_dependencies.sh
 ```
 
-### 3. 运行TargetScan
+### 3. Run TargetScan
 
 ```bash
 python3 ~/.openclaw/skills/mirna-target-tools/scripts/targetscan_predict.py \
@@ -44,11 +48,11 @@ python3 ~/.openclaw/skills/mirna-target-tools/scripts/targetscan_predict.py \
   --parse
 ```
 
-输出：
-- `results/targetscan_raw.txt` - 原始输出
-- `results/targetscan_raw.txt.tsv` - 解析后的表格
+Output:
+- `results/targetscan_raw.txt` - raw output
+- `results/targetscan_raw.txt.tsv` - parsed table
 
-### 4. 运行miRanda
+### 4. Run miRanda
 
 ```bash
 python3 ~/.openclaw/skills/mirna-target-tools/scripts/miranda_predict.py \
@@ -60,11 +64,11 @@ python3 ~/.openclaw/skills/mirna-target-tools/scripts/miranda_predict.py \
   --parse
 ```
 
-输出：
-- `results/miranda_raw.txt` - 原始输出
-- `results/miranda_raw.txt.tsv` - 解析后的表格
+Output:
+- `results/miranda_raw.txt` - raw output
+- `results/miranda_raw.txt.tsv` - parsed table
 
-### 5. 合并结果
+### 5. Merge results
 
 ```bash
 python3 ~/.openclaw/skills/mirna-target-tools/scripts/merge_targets.py \
@@ -73,12 +77,12 @@ python3 ~/.openclaw/skills/mirna-target-tools/scripts/merge_targets.py \
   --output results/merged_high_confidence.tsv
 ```
 
-### 6. 靶基因注释分析（新增）
+### 6. Target gene annotation (new)
 
-对合并后的高置信度靶基因做功能注释 + GO/KEGG 富集：
+Functional annotation + GO/KEGG enrichment of the merged high-confidence targets:
 
 ```bash
-# 从合并结果提取靶基因（列名 TargetGene），做注释 + 富集
+# Extract targets from the merged result (column name TargetGene), then annotate + enrich
 python3 ~/.openclaw/skills/mirna-target-tools/scripts/annotate_targets.py \
   --input results/merged_high_confidence.tsv \
   --gene-col TargetGene \
@@ -86,22 +90,22 @@ python3 ~/.openclaw/skills/mirna-target-tools/scripts/annotate_targets.py \
   --output-dir results/annotation
 ```
 
-输出（在 `results/annotation/` 下）：
-- `merged_high_confidence_gene_annotation.tsv` - 基因注释（symbol → Entrez/Ensembl ID + 功能描述）
-- `merged_high_confidence_enrichment_all.tsv` - 全部富集结果
-- `merged_high_confidence_GO_BP.tsv` / `_GO_CC.tsv` / `_GO_MF.tsv` / `_KEGG.tsv` - 分来源结果
+Output (under `results/annotation/`):
+- `merged_high_confidence_gene_annotation.tsv` - gene annotation (symbol -> Entrez/Ensembl ID + description)
+- `merged_high_confidence_enrichment_all.tsv` - all enrichment results
+- `merged_high_confidence_GO_BP.tsv` / `_GO_CC.tsv` / `_GO_MF.tsv` / `_KEGG.tsv` - per-source results
 
-**支持的物种**：human / mouse / rat / sheep（绵羊）/ goat（山羊）/ cow
+**Supported species**: human / mouse / rat / sheep / goat / cow
 
-**基因列表直接输入**（无需从合并结果提取）：
+**Direct gene list input** (no need to extract from the merged result):
 ```bash
 python3 ~/.openclaw/skills/mirna-target-tools/scripts/annotate_targets.py \
   --input gene_list.txt --plain-list \
   --species human --output-dir results/annotation
 ```
-其中 `gene_list.txt` 每行一个基因符号。
+where `gene_list.txt` has one gene symbol per line.
 
-### 7. 富集结果可视化（新增）
+### 7. Enrichment result visualization (new)
 
 ```bash
 python3 ~/.openclaw/skills/mirna-target-tools/scripts/plot_enrichment.py \
@@ -110,9 +114,9 @@ python3 ~/.openclaw/skills/mirna-target-tools/scripts/plot_enrichment.py \
   --source KEGG --top 15
 ```
 
-输出：`results/annotation/enrichment_bubble.png`（300 dpi 气泡图）
+Output: `results/annotation/enrichment_bubble.png` (300 dpi bubble plot)
 
-### 8. 生成Cytoscape网络
+### 8. Generate the Cytoscape network
 
 ```bash
 python3 ~/.openclaw/skills/mirna-target-tools/scripts/format_cytoscape.py \
@@ -121,88 +125,286 @@ python3 ~/.openclaw/skills/mirna-target-tools/scripts/format_cytoscape.py \
   --attr-output results/node_attributes.txt
 ```
 
-### 9. Cytoscape可视化
+### 9. Cytoscape visualization
 
-1. 打开Cytoscape
-2. `File -> Import -> Network from File` → 选择 `.sif` 文件
-3. `File -> Import -> Table from File` → 选择 `node_attributes.txt`，选"Import as Node Table"
-4. 应用布局：`Layout -> yFiles Organic`
-5. 样式设置：
-   - 将 `NodeType` 映射到 **Node Fill Color**
-   - 根据节点度调整 **Node Size** 突出核心基因
-   - 应用Style默认模板或VizMapper美化
+1. Open Cytoscape
+2. `File -> Import -> Network from File` -> select the `.sif` file
+3. `File -> Import -> Table from File` -> select `node_attributes.txt`, choosing "Import as Node Table"
+4. Apply a layout: `Layout -> yFiles Organic`
+5. Styling:
+   - Map `NodeType` to **Node Fill Color**
+   - Adjust **Node Size** by node degree to highlight hub genes
+   - Apply a default style template or use VizMapper to polish
 
-## miRNA 保守序列分析（独立功能）
+## Whole-transcriptome target prediction from miRNA sequences (v2.0.0)
 
-对目标 miRNA 做多物种保守性分析，验证种子区保守性（论文发表级）。该功能独立于靶基因预测流程，可单独使用。
+Use this when you have **only miRNA sequences** and want every target site across a
+species' mRNA set - no TargetScan database needed. It is independent of the
+TargetScan/miRanda workflow above and can be used on its own.
 
-### 从 miRBase 自动提取同源序列
+### 0. Get the miRNA sequences (optional)
+
+You do not have to prepare a FASTA - the toolkit can fetch sequences itself:
+
+```bash
+# every mature miRNA of a species
+python3 ~/.openclaw/skills/mirna-target-tools/scripts/fetch_mirnas.py \
+  --species goat --out goat_mirnas.fa
+
+# a few by name (species prefix optional)
+python3 ~/.openclaw/skills/mirna-target-tools/scripts/fetch_mirnas.py \
+  --names miR-21-5p,chi-miR-504-5p --out picked.fa
+```
+
+Sources are tried in order: a local `--mature-fa` > the cache > the miRBase download
+(several URLs) > an RNAcentral name lookup; everything is cached under
+`~/.cache/mirna-target-tools/`. The predictor accepts the same shortcuts directly:
+`--mirna-species goat` or `--mirna miR-21-5p,chi-miR-504-5p`.
+
+### 1. Pick the built-in species
+
+```bash
+python3 ~/.openclaw/skills/mirna-target-tools/scripts/predict_targets_genome.py --list-species
+```
+
+Built-in presets: human, mouse, rat, sheep, goat, cow, pig, chicken (aliases such as
+`hsa`, `chi`, `oar`, `mmu` are accepted). The Ensembl cDNA FASTA for the species is
+downloaded on first use and cached in `~/.cache/mirna-target-tools/genomes/`.
+
+### 2. Run the prediction
+
+```bash
+# built-in species (sheep example)
+python3 ~/.openclaw/skills/mirna-target-tools/scripts/predict_targets_genome.py \
+  --mirna-fa mirna.fa --species sheep \
+  --outdir results/genome --prefix sheep_targets
+
+# your own transcriptome FASTA (any species / assembly)
+python3 ~/.openclaw/skills/mirna-target-tools/scripts/predict_targets_genome.py \
+  --mirna-fa mirna.fa --mrna-fa my_transcripts.fa \
+  --outdir results/genome --prefix my_targets
+
+# your own genome + GTF annotation (mRNA rebuilt by joining exons)
+python3 ~/.openclaw/skills/mirna-target-tools/scripts/predict_targets_genome.py \
+  --mirna-fa mirna.fa --genome-fa genome.fa --gtf annotation.gtf \
+  --outdir results/genome --prefix custom_targets
+
+# quick smoke test: first 2,000 transcripts, top 20 targets per miRNA
+python3 ~/.openclaw/skills/mirna-target-tools/scripts/predict_targets_genome.py \
+  --mirna-fa mirna.fa --species goat --max-transcripts 2000 --top 20 \
+  --outdir results/genome --prefix quick
+```
+
+### 3. Output
+
+- `{prefix}_sites.tsv` - one row per predicted site (position, site type, weight, site sequence)
+- `{prefix}_targets.tsv` - one row per (miRNA, transcript), ranked by total score
+- `{prefix}_run_info.tsv` - run metadata (source, counts, parameters, site weights)
+
+### 4. Engines and target region
+
+- `--method seed` (default fallback): TargetScan site definitions only.
+- `--method miranda`: full miRanda duplex scan (score + dG) - works for any species,
+  but permissive on its own; tighten with `--miranda-score` / `--miranda-energy`.
+- `--method hybrid` (**default**, requires real miRanda 3.3a): keeps only seed
+  sites that a miRanda alignment overlaps, and reports score + dG for each.
+- `--target-region utr`: scan only 3'UTRs (sliced from the Ensembl GTF, downloaded
+  automatically for built-in species) instead of full transcripts; `--min-utr-length`
+  controls how short a 3'UTR may be to stay in the run.
+
+Example:
+
+```bash
+python3 ~/.openclaw/skills/mirna-target-tools/scripts/predict_targets_genome.py \
+  --mirna-fa mirna.fa --species goat --target-region utr --method hybrid \
+  --outdir results/genome --prefix goat_hybrid
+```
+
+### 5. Which strategy: cascade or triple?
+
+| | A - three-stage cascade (**fast**) | B - triple parallel (**slow, most complete**) |
+|---|---|---|
+| Command | `--method hybrid --refine-rnahybrid N` | `--method triple` |
+| Engines | seed -> miRanda -> RNAhybrid on the top N only | seed + miRanda + RNAhybrid over everything |
+| Keeps | seed sites confirmed by a miRanda alignment, with exact MFE for the refined top N | only targets supported by **all three** engines |
+| Evidence per row | seed type + miRanda score/dG (+ MFE, `mfe_verified`) | seed type + miRanda score/dG + RNAhybrid MFE/p-value (`evidence` column) |
+| Runtime | seconds-to-minutes per miRNA | RNAhybrid is ~60-100x slower than miRanda: hours per few miRNAs; keep to 3'UTRs and use `--jobs` |
+
+```bash
+# A: cascade
+python3 ~/.openclaw/skills/mirna-target-tools/scripts/predict_targets_genome.py \
+  --mirna-fa mirna.fa --species goat --target-region utr --method hybrid \
+  --refine-rnahybrid 200 --outdir results/genome --prefix goat_cascade
+
+# B: triple + intersection
+python3 ~/.openclaw/skills/mirna-target-tools/scripts/predict_targets_genome.py \
+  --mirna-fa mirna.fa --species goat --target-region utr --method triple \
+  --outdir results/genome --prefix goat_triple
+```
+
+### 6. Method and caveats
+
+Sites use the canonical TargetScan seed types (8mer / 7mer-m8 / 7mer-A1 / 6mer) with
+transparent weights 4 / 3 / 2 / 1 and a per-transcript sum. This is a transparent
+**seed heuristic, not TargetScan context++** - use it to prioritise candidates, then
+confirm key hits with TargetScan/miRanda or experimental validation.
+
+Quick knobs: `--max-transcripts N`, `--top N`, `--min-score X`, `--refresh`.
+
+### 7. Continue downstream
+
+Feed `{prefix}_targets.tsv` (column `gene_name`) straight into the annotation step:
+
+```bash
+python3 ~/.openclaw/skills/mirna-target-tools/scripts/annotate_targets.py \
+  --input results/genome/sheep_targets.tsv --gene-col gene_name \
+  --species sheep --output-dir results/annotation
+```
+
+## miRNA conserved sequence analysis (standalone)
+
+Multi-species conservation analysis of a target miRNA to validate seed-region conservation (publication grade). This feature is independent of the target prediction workflow and can be used on its own.
+
+### Auto-extract homologs from miRBase
 
 ```bash
 python3 ~/.openclaw/skills/mirna-target-tools/scripts/conservation_analysis.py \
-  --mirna miR-504-5p \
-  --reference-species chi \
+  --mirna miR-21-5p \
+  --reference-species hsa \
   --outdir results/conservation \
-  --prefix miR-504
+  --prefix miR-21
 ```
 
-首次运行会自动下载 miRBase `mature.fa`（缓存于 `~/.cache/mirna-target-tools/`），
-也可用 `--mature-fa` 指定本地文件。
+On first run it downloads miRBase `mature.fa` (cached in `~/.cache/mirna-target-tools/`).
+You can also point to a local file with `--mature-fa`.
 
-### 提供自己的多序列 FASTA
+### Supply your own multiple sequence FASTA
 
 ```bash
 python3 ~/.openclaw/skills/mirna-target-tools/scripts/conservation_analysis.py \
   --input-fa homologs.fa \
-  --reference-species chi \
+  --reference-species hsa \
   --outdir results/conservation
 ```
 
-### 关键参数
+### Key parameters
 
-| 参数 | 说明 | 默认 |
+| Parameter | Description | Default |
 |------|------|------|
-| `--mirna` | 目标 miRNA（如 miR-504-5p，不含物种前缀） | — |
-| `--input-fa` | 用户提供的多序列 FASTA（与 --mirna 二选一） | — |
-| `--reference-species` | 比对锚点参考物种前缀（如 chi/hsa） | 第一个序列 |
-| `--species` | 物种前缀白名单（逗号分隔） | 全部 |
-| `--seed-start/--seed-end` | 种子区范围 | 2 / 8 |
-| `--mature-fa` | 本地 miRBase mature.fa | 自动下载 |
-| `--no-plot` | 跳过绘图（仅输出 TSV） | 绘图 |
+| `--mirna` | target miRNA (e.g. miR-21-5p, without species prefix) | - |
+| `--input-fa` | user-supplied multiple sequence FASTA (mutually exclusive with --mirna) | - |
+| `--reference-species` | reference species prefix used as the alignment anchor (e.g. chi/hsa) | first sequence |
+| `--species` | allow-list of species prefixes (comma-separated) | all |
+| `--seed-start/--seed-end` | seed region range | 2 / 8 |
+| `--mature-fa` | local miRBase mature.fa | auto-download |
+| `--no-plot` | skip plotting (TSV output only) | plot |
 
-### 输出
+### Output
 
-- `{prefix}_aligned.fa` - 多序列比对（含 gap）
-- `{prefix}_conservation.tsv` - 每位置保守性（identity%、bits、碱基计数、覆盖率）
-- `{prefix}_summary.tsv` - 汇总（种子区/核心区保守性、平均成对同一性）
-- `{prefix}_sequence_logo.png/.svg` - 信息量序列 logo
-- `{prefix}_alignment.png/.svg` - 多序列比对图
+- `{prefix}_aligned.fa` - multiple sequence alignment (with gaps)
+- `{prefix}_conservation.tsv` - per-position conservation (identity %, bits, base counts, coverage)
+- `{prefix}_summary.tsv` - summary (seed/core region conservation, mean pairwise identity)
+- `{prefix}_sequence_logo.png/.svg` - information-content sequence logo
+- `{prefix}_alignment.png/.svg` - multiple sequence alignment figure
 
-## 参数选择建议
+## Two-stage 3'UTR refinement (v3.1.0; real-miRanda default in v3.2.0+)
 
-| 参数 | 宽松 | 严格 |
+```bash
+# stage 1: cheap seed scan (3'UTR)
+python3 scripts/predict_targets_genome.py --mirna-fa mirna.fa --species goat \
+    --target-region utr --method seed --outdir results/stage1 --prefix goat_seed
+
+# stage 2: extract windows around the best-scoring sites and re-predict
+python3 scripts/refine_sites.py --sites results/stage1/goat_seed_sites.tsv \
+    --species goat --mirna-fa mirna.fa --method both \
+    --outdir results/refine --prefix goat_refine
+```
+
+What stage 2 does:
+
+1. **Selects** seed sites by their preliminary weight (8mer 4 > 7mer-m8 3 >
+   7mer-A1 2 > 6mer 1), capped per miRNA (`--top-per-mirna`) and per
+   (miRNA, transcript) (`--max-per-transcript`).
+2. **Extracts** the annotated 3'UTR window around each site (`--flank`, default
+   60 nt) and verifies that the stage-1 seed sequence is still present at the
+   mapped position (guards against annotation-version drift). Nearby sites are
+   merged into one window. `--window-mode utr` extracts the whole 3'UTR of each
+   selected transcript instead of site-centred windows.
+3. **Re-predicts** only the windows with miRanda (score/dG) and/or RNAhybrid
+   (exact MFE), and writes a per-site `refined_call`
+   (`confirmed` / `partial` / `not_confirmed`).
+
+Outputs: `_selected_sites.tsv`, `_windows.fa`, `_refined_sites.tsv`,
+`_refined_targets.tsv`, `_miranda_hits.tsv`, `_rnahybrid_hits.tsv`,
+`_skipped.tsv`, `_refine_summary.tsv`.
+
+Notes:
+
+- If stage 1 used cDNA coordinates, supply `--gtf` (or `--species`, which fetches
+  one) so sites can be mapped onto the 3'UTR; sites outside the 3'UTR are
+  reported in `_skipped.tsv` with a reason.
+- `--method both` requires both engines; `--strict` turns a missing engine into
+  an error, otherwise the script degrades to the available one.
+- Windows are RNA FASTA; per-site MFE values refer to the window coordinates
+  reported in `rnahybrid_position`.
+
+## Plotting engine
+
+All figures (enrichment dot plots, sequence logo, alignment) are drawn with **R + ggplot2**
+by default:
+
+```bash
+bash scripts/install_r_deps.sh   # R + ggplot2/dplyr/stringr/scales (no root needed)
+python3 scripts/check_env.py     # reports whether the R engine is ready
+```
+
+Every plotting script accepts `--engine auto|r|python` (`auto` = R when available, else the
+matplotlib fallback). Both engines write 300 dpi PNG; add `--svg` for an editable vector file.
+
+## Statistical notes
+
+- Enrichment: `{prefix}_enrichment_all.tsv` keeps **all tested terms** with raw `p_value`
+  and a Benjamini-Hochberg `q_value` computed within each source over the full tested
+  family; `significant` marks `p < 0.05 & q < 0.05`. The per-source `_GO_*.tsv` / `_KEGG.tsv`
+  files contain the significant subset.
+- Whole-transcriptome prediction: raw scores scale with transcript length, so
+  `site_density_per_kb` / `score_per_kb` are provided for a fair comparison
+  (`--sort-by density`). Seed-based ranking is a prioritisation aid, not TargetScan context++.
+
+## Runtime depends on your computer
+
+Reference numbers (16-core WSL2 box, goat cDNA = 34,136 transcripts): seed scan ~5 s
+per miRNA (single-threaded, so CPU clock matters most); miRanda ~48 s per miRNA,
+parallelised with `--jobs` and scaling roughly with cores; RNAhybrid 60-100x slower
+than miRanda. Memory is proportional to the target set held in RAM (goat: a few
+hundred MB; human cDNA: a few GB). An older laptop or a busy shared server can be
+5-20x slower. Strategy: cheap engines and 3'UTRs first, then refine the top hits.
+
+## Parameter guidance
+
+| Parameter | Lenient | Strict |
 |------|------|------|
 | TargetScan context score | -0.1 | -0.5 |
 | miRanda energy | -10 | -20 |
 | miRanda score | 50 | 80 |
-| 富集 p-value 阈值 | 0.05 | 0.01 |
+| enrichment p-value threshold | 0.05 | 0.01 |
 
-## 常见问题
+## FAQ
 
-**Q: TargetScan找不到数据库？**  
-A: 需要手动从 https://www.targetscan.org/ 下载对应物种的数据库，然后用 `--database` 参数指定路径。
+**Q: TargetScan can't find a database?**
+A: Download the database for your species manually from https://www.targetscan.org/ and point to it with `--database`.
 
-**Q: miRanda编译报错？**  
-A: 检查是否安装了gcc。在Ubuntu上 `sudo apt-get install build-essential`。
+**Q: miRanda fails to compile?**
+A: Check that gcc is installed. On Ubuntu: `sudo apt-get install build-essential`.
 
-**Q: 结果太少怎么办？**  
-A: 放宽cutoff参数，或者取消只取交集。
+**Q: Too few results?**
+A: Loosen the cutoff parameters, or stop taking only the intersection.
 
-**Q: 注释分析报 "Invalid organism"？**  
-A: 确认物种名正确。山羊用 `goat`（映射到 g:Profiler 的 `chircus`）、绵羊用 `sheep`（`oarambouillet`）。脚本会自动映射，直接用通用名即可。
+**Q: Annotation reports "Invalid organism"?**
+A: Confirm the species name. Use `goat` for goat (mapped to g:Profiler's `chircus`) and `sheep` for sheep (`oarambouillet`). The script maps them automatically, so the common names work directly.
 
-**Q: 注释分析需要联网吗？**  
-A: 需要。基因注释走 MyGene.info，富集走 g:Profiler，均为在线 API（无需下载本地数据库）。离线场景请预先下载结果缓存。
+**Q: Does annotation need internet access?**
+A: Yes. Gene annotation uses MyGene.info and enrichment uses g:Profiler, both online APIs (no local database download). For offline use, cache the results in advance.
 
-**Q: 富集结果为空？**  
-A: 可能物种注释数据库中该基因集无显著富集通路；可放宽 p 阈值或确认基因符号与所选物种匹配。
+**Q: The enrichment results are empty?**
+A: Possibly no pathway in that species' annotation database is significantly enriched for this gene set; relax the p threshold or confirm the gene symbols match the chosen species.

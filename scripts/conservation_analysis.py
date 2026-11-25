@@ -1,55 +1,68 @@
 #!/usr/bin/env python3
 """
-miRNA 保守序列分析 (Conservation Analysis)
+miRNA conservation analysis (multi-species homolog alignment + conservation)
 
-从 miRBase 提取目标 miRNA 在多个物种中的同源成熟序列，进行多序列比对，
-计算每个位点的保守性（Shannon 信息量 bits + 同一性百分比），并输出：
-  - 多序列比对 FASTA（含 gap）
-  - 位点保守性统计表（TSV）
-  - 汇总统计表（TSV）
-  - 发表级序列 logo（信息量图，300dpi PNG + 可选 SVG）
-  - 发表级多序列比对图（300dpi PNG + 可选 SVG）
+Extracts homologous mature miRNA sequences for a target miRNA across species from miRBase, aligns them,
+computes per-position conservation (Shannon information content in bits + percent identity), and writes:
+  - multiple sequence alignment FASTA (with gaps)
+  - per-position conservation table (TSV)
+  - summary statistics table (TSV)
+  - publication-grade sequence logo (information content, 300 dpi PNG + optional SVG)
+  - publication-grade multiple sequence alignment figure (300 dpi PNG + optional SVG)
 
-用法（模式一：从 miRBase 自动提取同源序列）:
-  python conservation_analysis.py --mirna miR-504-5p \
-      --reference-species chi --outdir results/ --prefix miR-504
+Usage (mode 1: auto-extract homologs from miRBase):
+  python conservation_analysis.py --mirna miR-21-5p \
+      --reference-species hsa --outdir results/ --prefix miR-21
 
-用法（模式二：用户提供多序列 FASTA）:
+Usage (mode 2: user-supplied multiple sequence FASTA):
   python conservation_analysis.py --input-fa homologs.fa \
-      --outdir results/ --prefix miR-504
+      --outdir results/ --prefix miR-21
 
-依赖：
-  核心（FASTA/MSA/保守性计算）为纯标准库，零第三方依赖。
-  绘图需要 matplotlib（可选：缺失时跳过图，仅输出 TSV）。
+Dependencies:
+  Core (FASTA/MSA/conservation) uses only the standard library, with zero third-party dependencies.
+  Plotting requires matplotlib (optional: if missing, figures are skipped and only TSVs are written).
 """
 
 import argparse
 import gzip
 import math
 import os
+import shutil
+import subprocess
 import sys
 import urllib.request
 
 MIRBASE_URL = "https://www.mirbase.org/download/mature.fa"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "mirna-target-tools")
+MAX_DOWNLOAD_BYTES = int(os.environ.get("MIRNA_MAX_DOWNLOAD_MB", "4096")) * 1024 * 1024
 
-# WebLogo 标准碱基配色（RNA）
+
+def safe_prefix(value):
+    """Reject prefixes that would write outside --outdir."""
+    text = str(value).strip()
+    if (not text or text in (".", "..")
+            or any(ch in text for ch in ("/", "\\", "\x00", "\n", "\r", "\t"))):
+        raise SystemExit("Error: invalid --prefix %r (path separators and control "
+                         "characters are not allowed)" % value)
+    return text
+
+# WebLogo standard base colors (RNA)
 BASE_COLORS = {
     'A': '#2ecc71',  # green
     'C': '#3498db',  # blue
     'G': '#f39c12',  # orange
     'U': '#e74c3c',  # red
-    'T': '#e74c3c',  # red (DNA T 归并为 U)
+    'T': '#e74c3c',  # red (DNA T is merged into U)
 }
 VALID_BASES = set('ACGU')
 
 
 # ---------------------------------------------------------------------------
-# FASTA 处理
+# FASTA handling
 # ---------------------------------------------------------------------------
 
 def parse_fasta(path):
-    """解析 FASTA（支持 .gz）。返回 [(header, seq), ...]，header 含 '>'。"""
+    """Parse FASTA (supports .gz). Returns [(header, seq), ...] where header includes '>'."""
     seqs = []
     name = None
     seq_parts = []
@@ -80,21 +93,21 @@ def write_fasta(path, records):
 
 
 def normalize_rna(seq):
-    """统一为 RNA 大写，T -> U，仅保留 ACGU（其余字符替换为 N）。"""
+    """Normalize to uppercase RNA, T -> U, keeping only ACGU (other characters become N)."""
     seq = seq.upper().replace('T', 'U')
     return ''.join(c if c in VALID_BASES else 'N' for c in seq)
 
 
 # ---------------------------------------------------------------------------
-# 序列比对（Needleman-Wunsch 全局比对）
+# Sequence alignment (Needleman-Wunsch global alignment)
 # ---------------------------------------------------------------------------
 
 def needleman_wunsch(seq1, seq2, match=2, mismatch=-1, gap=-2):
-    """端 gap 免费的全局比对（适合 miRNA：5' 种子区保守、3' 端 isomiR 变异）。
+    """Global alignment with free end gaps (suited to miRNA: conserved 5' seed, isomiR variation at the 3' end).
 
-    第一行/列初始化为 0（端 gap 不惩罚），回溯从最后一行/列的全局最大得分
-    处开始，保证完整保留两条序列，gap 集中于端部而非散落在序列中间。
-    返回 (aligned1, aligned2)，gap 用 '-'。
+    The first row/column is initialized to 0 (no end-gap penalty), and traceback starts from the
+    global maximum of the last row/column, keeping both sequences whole and pushing gaps to the ends.
+    Returns (aligned1, aligned2), using '-' for gaps.
     """
     m, n = len(seq1), len(seq2)
     score = [[0] * (n + 1) for _ in range(m + 1)]
@@ -105,7 +118,7 @@ def needleman_wunsch(seq1, seq2, match=2, mismatch=-1, gap=-2):
             left = score[i][j - 1] + gap
             score[i][j] = max(diag, up, left)
 
-    # 回溯起点：最后一行/列的全局最大得分（端 gap 免费）
+    # Traceback start: global maximum of the last row/column (free end gaps)
     best = -1e9
     bi, bj = m, n
     for i in range(m + 1):
@@ -115,7 +128,7 @@ def needleman_wunsch(seq1, seq2, match=2, mismatch=-1, gap=-2):
         if score[m][j] > best:
             best, bi, bj = score[m][j], m, j
 
-    # 回溯到 (0, 0)
+    # Trace back to (0, 0)
     mid1, mid2 = [], []
     i, j = bi, bj
     while i > 0 and j > 0:
@@ -126,14 +139,14 @@ def needleman_wunsch(seq1, seq2, match=2, mismatch=-1, gap=-2):
             mid1.append(seq1[i - 1]); mid2.append('-'); i -= 1
         else:
             mid1.append('-'); mid2.append(seq2[j - 1]); j -= 1
-    # 前导端 gap（免费）
+    # leading end gaps (free)
     while i > 0:
         mid1.append(seq1[i - 1]); mid2.append('-'); i -= 1
     while j > 0:
         mid1.append('-'); mid2.append(seq2[j - 1]); j -= 1
     mid1.reverse(); mid2.reverse()
 
-    # 尾随端 gap（免费）
+    # trailing end gaps (free)
     tail1 = seq1[bi:]
     tail2 = seq2[bj:]
     L = max(len(tail1), len(tail2))
@@ -143,21 +156,21 @@ def needleman_wunsch(seq1, seq2, match=2, mismatch=-1, gap=-2):
 
 
 # ---------------------------------------------------------------------------
-# 递进式多序列比对（star alignment）
+# Progressive multiple sequence alignment (star alignment)
 #
-# 模型：对齐 = 锚点（参考序列原始位置 0..L-1）+ 插入槽（槽 k = 锚点 k-1 与
-# 锚点 k 之间，k=0 为开头，k=L 为结尾）。每个序列在每个锚点有一个字符（或
-# gap），在每个插入槽有若干插入字符。所有序列共享同一组插入列（取各序列在
-# 该槽插入字符数的最大值，不足者以 '-' 补齐，左对齐）。
+# Model: an alignment = anchors (reference positions 0..L-1) + insertion slots (slot k lies
+# between anchor k-1 and anchor k; k=0 is the start and k=L is the end). Each sequence has one
+# character (or gap) at each anchor and some inserted characters in each slot. All sequences share
+# the same set of insertion columns (max insert count for the slot, left-aligned, padded with '-').
 # ---------------------------------------------------------------------------
 
 def progressive_msa(seqs, names, ref_idx=0):
-    """返回 dict: name -> aligned string（含 gap，长度一致）。"""
+    """Returns dict: name -> aligned string (with gaps, all the same length)."""
     ref = seqs[ref_idx]
     L = len(ref)
     n = len(seqs)
 
-    # 每个序列的锚点字符（list of L chars）与插入字符（list of L+1 个槽）
+    # Per-sequence anchor characters (list of L chars) and insertions (list of L+1 slots)
     anchor = {}
     insert = {}
     anchor[names[ref_idx]] = list(ref)
@@ -175,8 +188,8 @@ def progressive_msa(seqs, names, ref_idx=0):
         ref_pos = 0
         for rc, sc in zip(a_ref, a_s):
             if rc == '-':
-                # ref 在此为 gap => s 在"锚点 ref_pos 之前"插入字符 sc
-                # 属于插入槽 ref_pos（槽 k = 锚点 k-1 之后、锚点 k 之前）
+                # ref is a gap here => s inserts character sc "before anchor ref_pos"
+                # belonging to insertion slot ref_pos (slot k = after anchor k-1, before anchor k)
                 s_insert[ref_pos].append(sc)
             else:
                 s_anchor[ref_pos] = sc
@@ -184,13 +197,13 @@ def progressive_msa(seqs, names, ref_idx=0):
         anchor[name] = s_anchor
         insert[name] = s_insert
 
-    # 合并插入槽：每个槽的列数取所有序列该槽插入字符数的最大值
+    # Merge insertion slots: each slot's width is the max insert count across sequences
     slot_len = [0] * (L + 1)
     for name in names:
         for k in range(L + 1):
             slot_len[k] = max(slot_len[k], len(insert[name][k]))
 
-    # 渲染每个序列的最终对齐字符串（插入字符左对齐，右补 '-'）
+    # Render each sequence's final aligned string (insertions left-aligned, right-padded with '-')
     result = {}
     for name in names:
         chars = []
@@ -205,15 +218,15 @@ def progressive_msa(seqs, names, ref_idx=0):
 
 
 # ---------------------------------------------------------------------------
-# 保守性计算
+# Conservation computation
 # ---------------------------------------------------------------------------
 
 def position_conservation(column_chars):
-    """给定一列字符（含 gap/N），计算保守性指标。
+    """Given a column of characters (including gap/N), compute conservation metrics.
 
-    返回 dict: consensus, identity(%), bits, counts, gap_count, valid_count
-    - bits: Shannon 信息量 = log2(4) - H，基于非 gap/N 的 ACGU 分布
-    - identity: 最常见碱基占非 gap/N 序列的比例（%）
+    Returns dict: consensus, identity(%), bits, counts, gap_count, valid_count
+    - bits: Shannon information content = log2(4) - H, from the ACGU distribution excluding gap/N
+    - identity: percentage of non-gap/N sequences matching the most common base (%)
     """
     counts = {'A': 0, 'C': 0, 'G': 0, 'U': 0}
     gap_count = 0
@@ -223,7 +236,7 @@ def position_conservation(column_chars):
         elif ch in counts:
             counts[ch] += 1
         else:
-            # 'N' 或其他，视为缺失，不参与
+            # 'N' or anything else: treated as missing, not counted
             gap_count += 1
     valid = sum(counts.values())
     total = len(column_chars)
@@ -239,7 +252,7 @@ def position_conservation(column_chars):
             'gap_percent': gap_percent, 'coverage': coverage, 'total': total,
         }
 
-    # 信息量（bits，基于非 gap 的 ACGU 分布）
+    # Information content (bits, from the ACGU distribution excluding gaps)
     H = 0.0
     for b in 'ACGU':
         c = counts[b]
@@ -259,7 +272,7 @@ def position_conservation(column_chars):
 
 
 def pairwise_identity(aligned1, aligned2):
-    """两序列（等长，含 gap）的成对同一性（%）。（只统计双方均非 gap 的位点）"""
+    """Pairwise identity (%) between two sequences (equal length, with gaps; only non-gap sites)."""
     match = 0
     total = 0
     for a, b in zip(aligned1, aligned2):
@@ -272,199 +285,275 @@ def pairwise_identity(aligned1, aligned2):
 
 
 # ---------------------------------------------------------------------------
-# 可视化
+# Visualization
 # ---------------------------------------------------------------------------
 
-def draw_sequence_logo(msa, names, seed_start, seed_end, out_png, out_svg=None):
-    """绘制信息量序列 logo。msa: dict name -> aligned string。"""
+# Shared journal-friendly look (matches plot_enrichment.py):
+# white background, no top/right spines, muted ticks, left-aligned title,
+# soft amber wash for the seed region, editable text in SVG output.
+INK = '#222222'
+MUTED = '#6b7280'
+GRID = '#e9e9e9'
+SEED_TINT = '#FBF0D5'
+GAP_COLOR = '#E4E7EB'
+
+
+def _setup_matplotlib():
+    """Import matplotlib lazily and apply the shared plotting style."""
     try:
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle
     except ImportError:
-        print("Warning: matplotlib 未安装，跳过序列 logo 绘制。")
-        return False
+        return None
+    matplotlib.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['DejaVu Sans', 'Arial', 'Helvetica', 'sans-serif'],
+        'axes.unicode_minus': False,
+        'svg.fonttype': 'none',
+    })
+    return plt
 
-    # 转置：按列收集字符
+
+def _style_axes(ax, grid_axis=None):
+    for side in ('top', 'right'):
+        ax.spines[side].set_visible(False)
+    for side in ('left', 'bottom'):
+        ax.spines[side].set_color('#c9ccd1')
+        ax.spines[side].set_linewidth(0.9)
+    ax.tick_params(colors=MUTED, length=3, width=0.9)
+    ax.tick_params(axis='y', length=0)
+    ax.set_axisbelow(True)
+    if grid_axis:
+        ax.grid(axis=grid_axis, color=GRID, linewidth=0.8)
+    else:
+        ax.grid(False)
+
+
+def _save(fig, plt, out_png, out_svg=None, dpi=300):
+    fig.savefig(out_png, dpi=dpi, bbox_inches='tight', facecolor='white')
+    if out_svg:
+        fig.savefig(out_svg, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+
+
+def _position_ticks(ax, width, fontsize=7.5):
+    if width <= 30:
+        step = 1
+    elif width <= 60:
+        step = 2
+    else:
+        step = 5
+    ticks = list(range(1, width + 1, step))
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([str(t) for t in ticks], fontsize=fontsize)
+    ax.set_xlim(0.5, width + 0.5)
+
+
+def draw_sequence_logo(msa, names, seed_start, seed_end, out_png, out_svg=None):
+    """Draw the information-content sequence logo. msa: dict name -> aligned string."""
+    plt = _setup_matplotlib()
+    if plt is None:
+        print("Warning: matplotlib is not installed; skipping the sequence logo plot.")
+        return False
+    from matplotlib.patches import Rectangle
+
     aligned = [msa[n] for n in names]
     width = len(aligned[0])
     cols = [[aligned[r][c] for r in range(len(aligned))] for c in range(width)]
-
-    # 计算每列信息量与碱基高度
     stats = [position_conservation(col) for col in cols]
 
-    fig, ax = plt.subplots(figsize=(max(6, width * 0.5), 3.2))
+    fig, ax = plt.subplots(figsize=(max(6.5, width * 0.46), 3.0))
+    fig.patch.set_facecolor('white')
+
+    # seed-region background wash (drawn first, keeps bubbles crisp)
+    if seed_start and seed_end:
+        ax.axvspan(seed_start - 0.5, seed_end + 0.5, color=SEED_TINT, zorder=0)
+        ax.text((seed_start + seed_end) / 2.0, 2.10,
+                'seed (nt %d-%d)' % (seed_start, seed_end),
+                ha='center', va='bottom', fontsize=8, color='#9a7b3f',
+                style='italic', zorder=5)
 
     for c in range(width):
         st = stats[c]
         x = c + 1
         if st['valid_count'] == 0:
-            # 全 gap 位置：画灰色表示缺失
-            ax.add_patch(Rectangle((x - 0.5, 0), 0.8, 2.0,
-                                   facecolor='#e8e8e8', edgecolor='none', zorder=2))
+            ax.add_patch(Rectangle((x - 0.45, 0), 0.9, 2.0, facecolor=GAP_COLOR,
+                                   edgecolor='none', zorder=2))
             continue
         coverage = st['coverage']
         bits = st['bits']
-        # 有效信息量：覆盖度 < 50% 时按覆盖度缩放，避免低覆盖位置虚高
+        # scale by coverage below 50% so sparse columns do not look over-confident
         eff_bits = bits if coverage >= 50.0 else bits * (coverage / 100.0)
         bottom = 0.0
-        # 按频率降序堆叠（更美观）
-        order = sorted('ACGU', key=lambda b: st['counts'][b], reverse=True)
-        for b in order:
+        for b in sorted('ACGU', key=lambda b: st['counts'][b], reverse=True):
             cnt = st['counts'][b]
             if cnt == 0:
                 continue
-            p = cnt / st['valid_count']
-            h = p * eff_bits
+            h = (cnt / st['valid_count']) * eff_bits
             if h <= 0.001:
                 continue
-            ax.add_patch(Rectangle(
-                (x - 0.5, bottom), 0.8, h,
-                facecolor=BASE_COLORS[b], edgecolor='black', linewidth=0.3, zorder=3))
-            ax.text(x, bottom + h / 2, b, ha='center', va='center',
-                    fontsize=10, fontweight='bold', color='black', zorder=4)
+            ax.add_patch(Rectangle((x - 0.45, bottom), 0.9, h,
+                                   facecolor=BASE_COLORS[b], edgecolor='white',
+                                   linewidth=0.5, zorder=3))
+            if h >= 0.22:
+                ax.text(x, bottom + h / 2.0, b, ha='center', va='center',
+                        fontsize=9.5, fontweight='bold', color='white', zorder=4)
             bottom += h
-        # 低覆盖位置标注覆盖率
         if coverage < 50.0:
-            ax.text(x, 2.05, f'{coverage:.0f}%', ha='center', va='bottom',
-                    fontsize=6, color='#999999', zorder=5)
+            ax.text(x, 2.04, '%d%%' % round(coverage), ha='center', va='bottom',
+                    fontsize=6.5, color=MUTED, zorder=5)
 
-    # 种子区背景高亮
-    if seed_start and seed_end:
-        ax.axvspan(seed_start - 0.5, seed_end + 0.5, color='#fff3cd',
-                   alpha=0.45, zorder=1)
-        ax.text((seed_start + seed_end) / 2, 2.15, f'seed (nt {seed_start}-{seed_end})',
-                ha='center', va='bottom', fontsize=8, color='#8a6d3b', style='italic')
-
-    ax.set_xlim(0.5, width + 0.5)
-    ax.set_ylim(0, 2.15)
-    ax.set_xticks(range(1, width + 1))
-    ax.set_xticklabels(range(1, width + 1), fontsize=8)
-    ax.set_xlabel('Position (nt, 5\u2032 \u2192 3\u2032)', fontsize=10)
-    ax.set_ylabel('Information content (bits)', fontsize=10)
-    ax.set_title('miRNA sequence conservation', fontsize=12, fontweight='bold')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    _position_ticks(ax, width)
+    ax.set_ylim(0, 2.18)
     ax.set_yticks([0, 0.5, 1.0, 1.5, 2.0])
+    ax.set_xlabel('Position (nt, 5\u2032 \u2192 3\u2032)', fontsize=10, color=INK, labelpad=6)
+    ax.set_ylabel('Information content (bits)', fontsize=10, color=INK, labelpad=6)
+    ax.set_title('miRNA sequence conservation', loc='left', fontsize=12.5,
+                 color=INK, pad=14)
+    _style_axes(ax)
 
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=300, bbox_inches='tight')
-    if out_svg:
-        plt.savefig(out_svg, bbox_inches='tight')
-    plt.close(fig)
+    _save(fig, plt, out_png, out_svg)
     return True
 
 
 def draw_alignment(msa, names, seed_start, seed_end, out_png, out_svg=None):
-    """绘制多序列比对图。"""
-    try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle
-    except ImportError:
-        print("Warning: matplotlib 未安装，跳过比对图绘制。")
+    """Draw the multiple sequence alignment figure."""
+    plt = _setup_matplotlib()
+    if plt is None:
+        print("Warning: matplotlib is not installed; skipping the alignment plot.")
         return False
+    from matplotlib.patches import Rectangle
 
     aligned = [msa[n] for n in names]
     n_rows = len(aligned)
     width = len(aligned[0])
 
-    fig, ax = plt.subplots(figsize=(max(6, width * 0.42), max(2.5, n_rows * 0.45)))
+    fig, ax = plt.subplots(figsize=(max(6.5, width * 0.40), max(2.4, n_rows * 0.42)))
+    fig.patch.set_facecolor('white')
+
+    if seed_start and seed_end:
+        ax.axvspan(seed_start - 0.5, seed_end + 0.5, color=SEED_TINT, zorder=0)
 
     for r, name in enumerate(names):
         seq = aligned[r]
-        y = n_rows - r  # 参考在顶部
+        y = n_rows - r  # reference on top
         for c, ch in enumerate(seq):
             if ch == '-':
-                color = '#d9d9d9'
+                face = GAP_COLOR
             elif ch in BASE_COLORS:
-                color = BASE_COLORS[ch]
+                face = BASE_COLORS[ch]
             else:
-                color = '#999999'
-            ax.add_patch(Rectangle((c + 0.5, y - 0.4), 1.0, 0.8,
-                                   facecolor=color, edgecolor='none'))
+                face = '#B8BDC4'
+            ax.add_patch(Rectangle((c + 0.5, y - 0.36), 1.0, 0.72,
+                                   facecolor=face, edgecolor='white',
+                                   linewidth=0.3, zorder=2))
             if ch != '-':
-                ax.text(c + 1.0, y, ch, ha='center', va='center',
-                        fontsize=9, fontweight='bold', color='black', zorder=3)
+                ax.text(c + 1.0, y, ch, ha='center', va='center', fontsize=8.5,
+                        fontweight='bold', color='white', zorder=3)
+        if r:
+            ax.axhline(y + 0.5, color='#F1F3F5', linewidth=0.8, zorder=1)
 
-    # 种子区背景
-    if seed_start and seed_end:
-        ax.axvspan(seed_start - 0.5, seed_end + 0.5, color='#fff3cd',
-                   alpha=0.35, zorder=1)
-
-    ax.set_xlim(0.5, width + 0.5)
+    _position_ticks(ax, width, fontsize=7.0)
     ax.set_ylim(0.5, n_rows + 0.5)
-    ax.set_xticks(range(1, width + 1))
-    ax.set_xticklabels(range(1, width + 1), fontsize=7)
     ax.set_yticks(range(1, n_rows + 1))
-    ax.set_yticklabels(names, fontsize=8)
-    ax.set_xlabel('Position (nt, 5\u2032 \u2192 3\u2032)', fontsize=10)
-    ax.set_title('Multiple sequence alignment', fontsize=12, fontweight='bold')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.grid(axis='x', linestyle='-', linewidth=0.4, alpha=0.15)
+    ax.set_yticklabels(names, fontsize=8.5, color=INK)
+    ax.set_xlabel('Position (nt, 5\u2032 \u2192 3\u2032)', fontsize=10, color=INK, labelpad=6)
+    title = 'Multiple sequence alignment'
+    if seed_start and seed_end:
+        title += '  (seed nt %d-%d highlighted)' % (seed_start, seed_end)
+    ax.set_title(title, loc='left', fontsize=12.5, color=INK, pad=14)
+    _style_axes(ax)
 
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=300, bbox_inches='tight')
-    if out_svg:
-        plt.savefig(out_svg, bbox_inches='tight')
-    plt.close(fig)
+    _save(fig, plt, out_png, out_svg)
     return True
 
 
 # ---------------------------------------------------------------------------
-# 主流程
+# Main flow
 # ---------------------------------------------------------------------------
 
 def fetch_mature_fa(mature_fa=None):
-    """获取 mature.fa 路径（本地文件或下载缓存）。返回路径。"""
-    if mature_fa and os.path.exists(mature_fa):
+    """Return the mature.fa path (local file or a validated download cache)."""
+    if mature_fa:
+        if not os.path.exists(mature_fa):
+            raise SystemExit("Error: --mature-fa %s not found" % mature_fa)
         return mature_fa
 
     cache_path = os.path.join(CACHE_DIR, "mature.fa")
-    if os.path.exists(cache_path):
+    if os.path.exists(cache_path) and _looks_like_fasta(cache_path):
         return cache_path
 
     os.makedirs(CACHE_DIR, exist_ok=True)
-    print(f"下载 miRBase mature.fa ... ({MIRBASE_URL})")
+    print(f"Downloading miRBase mature.fa ... ({MIRBASE_URL})")
+    tmp = cache_path + ".part"
+    req = urllib.request.Request(MIRBASE_URL, headers={'User-Agent': 'mirna-target-tools/1.0'})
     try:
-        req = urllib.request.Request(MIRBASE_URL, headers={'User-Agent': 'mirna-target-tools/1.0'})
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = resp.read()
-        with open(cache_path, 'wb') as fh:
-            fh.write(data)
-        print(f"已缓存到 {cache_path} ({len(data)} bytes)")
+        with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, 'wb') as fh:
+            length = resp.headers.get('Content-Length')
+            if length and length.isdigit() and int(length) > MAX_DOWNLOAD_BYTES:
+                raise RuntimeError('remote file exceeds the download safety limit')
+            total = 0
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_DOWNLOAD_BYTES:
+                    raise RuntimeError('download exceeded the %d MB safety limit'
+                                       % (MAX_DOWNLOAD_BYTES // (1024 * 1024)))
+                fh.write(chunk)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if not _looks_like_fasta(tmp):
+            raise RuntimeError('downloaded file is not a FASTA file')
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, cache_path)
+        print(f"Cached to {cache_path} ({os.path.getsize(cache_path)} bytes)")
         return cache_path
     except Exception as e:
-        print(f"Error: 下载 miRBase mature.fa 失败: {e}")
-        print("请手动下载并指定: --mature-fa /path/to/mature.fa")
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        print(f"Error: failed to download miRBase mature.fa: {e}")
+        print("Please download it manually and pass: --mature-fa /path/to/mature.fa")
         sys.exit(1)
 
 
-def extract_homologs(mature_fa, mirna_id, species_filter=None):
-    """从 mature.fa 提取 mirna_id 的所有同源序列。
+def _looks_like_fasta(path):
+    """Cheap sanity check for a cached/downloaded FASTA file."""
+    try:
+        if os.path.getsize(path) < 100000:
+            return False
+        with open(path, 'rb') as fh:
+            return fh.read(1) == b'>'
+    except OSError:
+        return False
 
-    mirna_id 形如 'miR-504-5p'（不含物种前缀）。
-    返回 [(species_prefix, mirna_id, accession, species_name, seq), ...]
+
+def extract_homologs(mature_fa, mirna_id, species_filter=None):
+    """Extract all homologs of mirna_id from mature.fa.
+
+    mirna_id looks like 'miR-21-5p' (without the species prefix).
+    Returns [(species_prefix, mirna_id, accession, species_name, seq), ...]
     """
     records = parse_fasta(mature_fa)
     hits = []
     for header, seq in records:
-        # header: 'hsa-miR-504-5p MIMAT0002875 Homo sapiens miR-504-5p'
+        # header: 'hsa-miR-21-5p MIMAT0000076 Homo sapiens miR-21-5p'
         fields = header.split()
         if not fields:
             continue
-        name_field = fields[0]  # 'hsa-miR-504-5p'
+        name_field = fields[0]  # 'hsa-miR-21-5p'
         if '-' not in name_field:
             continue
         prefix, rest = name_field.split('-', 1)
-        # 精确匹配 mirbase-id（rest == mirna_id），避免 miR-5046 误配
+        # Exact mirbase-id match (rest == mirna_id) to avoid prefix collisions such as miR-21 vs miR-210
         if rest != mirna_id:
             continue
         accession = fields[1] if len(fields) > 1 else ''
-        # 物种名 = 中间字段（去掉 name_field 和 accession 和末尾重复的 mirna-id）
+        # Species name = middle fields (drop name_field, accession, and the trailing mirna-id)
         if len(fields) >= 4:
             species_name = ' '.join(fields[2:-1])
         else:
@@ -475,26 +564,60 @@ def extract_homologs(mature_fa, mirna_id, species_filter=None):
     return hits
 
 
+SKILL_SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+R_CONSERVATION_SCRIPT = os.path.join(SKILL_SCRIPTS, 'plot_conservation.R')
+R_PLOT_PKGS = ('ggplot2', 'dplyr')
+R_PKG_CHECK = ('args <- commandArgs(TRUE); '
+               'ok <- vapply(args, function(p) requireNamespace(p, quietly=TRUE), '
+               'logical(1)); cat(all(ok))')
+
+
+def r_engine_status():
+    """Return (ok, message) for the R plotting engine (Rscript + packages)."""
+    if shutil.which('Rscript') is None:
+        return False, 'Rscript not found on PATH'
+    try:
+        proc = subprocess.run(['Rscript', '--vanilla', '-e', R_PKG_CHECK] + list(R_PLOT_PKGS),
+                              capture_output=True, text=True, timeout=180)
+    except Exception as exc:                      # pragma: no cover
+        return False, 'Rscript failed: %s' % exc
+    if proc.stdout.strip().upper().startswith('TRUE'):
+        return True, 'R + ' + '/'.join(R_PLOT_PKGS)
+    return False, 'missing R packages: %s' % ', '.join(R_PLOT_PKGS)
+
+
+def draw_with_r(outdir, prefix, seed_start, seed_end):
+    """Draw the logo + alignment with the ggplot2 script. True on success."""
+    if not os.path.exists(R_CONSERVATION_SCRIPT):
+        print("  R plotting script not found: %s" % R_CONSERVATION_SCRIPT)
+        return False
+    cmd = ['Rscript', '--vanilla', R_CONSERVATION_SCRIPT,
+           '--outdir', outdir, '--prefix', prefix,
+           '--seed-start', str(seed_start), '--seed-end', str(seed_end)]
+    print("  drawing figures with R (ggplot2) ...")
+    return subprocess.call(cmd) == 0
+
+
 def run_conservation(records, names, seed_start, seed_end, outdir, prefix,
-                     ref_idx=0, make_plots=True):
-    """records: [(seq, ...)] 与 names 对应，已规范化。执行比对+保守性+输出。"""
+                     ref_idx=0, make_plots=True, engine='auto'):
+    """records: [(seq, ...)] parallel to names, already normalized. Runs alignment + conservation + output."""
     os.makedirs(outdir, exist_ok=True)
     seqs = [r[4] for r in records]
-    full_names = [f"{r[0]}-{r[1]}" for r in records]  # 'chi-miR-504-5p'
+    full_names = [f"{r[0]}-{r[1]}" for r in records]  # 'hsa-miR-21-5p'
 
     # MSA
     msa = progressive_msa(seqs, full_names, ref_idx=ref_idx)
-    # 保持输入顺序
+    # Preserve input order
     aligned_seqs = [msa[n] for n in full_names]
 
-    # 1) 比对 FASTA
+    # 1) Alignment FASTA
     fasta_path = os.path.join(outdir, f"{prefix}_aligned.fa")
     write_fasta(fasta_path, [
         (f"{r[0]}-{r[1]} {r[2]} {r[3]}", aligned_seqs[i])
         for i, r in enumerate(records)
     ])
 
-    # 2) 位点保守性表
+    # 2) Per-position conservation table
     width = len(aligned_seqs[0])
     cols = [[aligned_seqs[r][c] for r in range(len(aligned_seqs))] for c in range(width)]
     cons_path = os.path.join(outdir, f"{prefix}_conservation.tsv")
@@ -510,7 +633,7 @@ def run_conservation(records, names, seed_start, seed_end, outdir, prefix,
                 f"{st['gap_count']}\t{st['valid_count']}\t{st['coverage']:.1f}\t{is_seed}\n"
             )
 
-    # 3) 汇总统计
+    # 3) Summary statistics
     stats = [position_conservation(col) for col in cols]
     seed_bits = []
     seed_identity = []
@@ -521,11 +644,11 @@ def run_conservation(records, names, seed_start, seed_end, outdir, prefix,
             seed_bits.append(stats[c]['bits'])
             seed_identity.append(stats[c]['identity'])
 
-    # 核心区（覆盖度 >= 50%）统计
+    # Core region (coverage >= 50%) statistics
     core_bits = [s['bits'] for s in stats if s['coverage'] >= 50.0]
     core_identity = [s['identity'] for s in stats if s['coverage'] >= 50.0]
 
-    # 平均成对同一性
+    # Mean pairwise identity
     pw = []
     for i in range(len(aligned_seqs)):
         for j in range(i + 1, len(aligned_seqs)):
@@ -552,16 +675,30 @@ def run_conservation(records, names, seed_start, seed_end, outdir, prefix,
         fully_conserved = sum(1 for s in stats if s['identity'] >= 100.0 and s['valid_count'] > 0)
         fh.write(f"fully_conserved_positions\t{fully_conserved}\n")
 
-    # 4) 图
+    # 4) Figures - R (ggplot2) by default, matplotlib as the fallback
+    ok_logo = ok_aln = False
     if make_plots:
-        logo_png = os.path.join(outdir, f"{prefix}_sequence_logo.png")
-        logo_svg = os.path.join(outdir, f"{prefix}_sequence_logo.svg")
-        aln_png = os.path.join(outdir, f"{prefix}_alignment.png")
-        aln_svg = os.path.join(outdir, f"{prefix}_alignment.svg")
-        ok_logo = draw_sequence_logo(msa, full_names, seed_start, seed_end, logo_png, logo_svg)
-        ok_aln = draw_alignment(msa, full_names, seed_start, seed_end, aln_png, aln_svg)
-    else:
-        ok_logo = ok_aln = False
+        if engine in ('auto', 'r'):
+            ok, why = r_engine_status()
+            if ok:
+                ok_logo = ok_aln = draw_with_r(outdir, prefix, seed_start, seed_end)
+                if not ok_logo:
+                    print("  R plotting failed%s" % ("" if engine == 'auto' else ""))
+            else:
+                print("  R plotting engine unavailable: %s" % why)
+                print("  install it with: bash %s"
+                      % os.path.join(SKILL_SCRIPTS, 'install_r_deps.sh'))
+            if not ok_logo and engine == 'r':
+                raise SystemExit("Error: R plotting was requested but is unavailable.")
+        if not ok_logo:
+            if engine == 'auto':
+                print("  falling back to the Python (matplotlib) engine")
+            logo_png = os.path.join(outdir, f"{prefix}_sequence_logo.png")
+            logo_svg = os.path.join(outdir, f"{prefix}_sequence_logo.svg")
+            aln_png = os.path.join(outdir, f"{prefix}_alignment.png")
+            aln_svg = os.path.join(outdir, f"{prefix}_alignment.svg")
+            ok_logo = draw_sequence_logo(msa, full_names, seed_start, seed_end, logo_png, logo_svg)
+            ok_aln = draw_alignment(msa, full_names, seed_start, seed_end, aln_png, aln_svg)
 
     return {
         'fasta': fasta_path,
@@ -574,41 +711,47 @@ def run_conservation(records, names, seed_start, seed_end, outdir, prefix,
 
 def main():
     parser = argparse.ArgumentParser(
-        description='miRNA 保守序列分析（多物种同源序列比对 + 保守性可视化）')
+        description='miRNA conservation analysis (multi-species homolog alignment + conservation plots)')
     src = parser.add_mutually_exclusive_group(required=True)
-    src.add_argument('--mirna', help='目标 miRNA（如 miR-504-5p），从 miRBase 提取同源序列')
-    src.add_argument('--input-fa', help='用户提供的多序列 FASTA 文件')
-    parser.add_argument('--mature-fa', help='本地 miRBase mature.fa 路径（可选）')
+    src.add_argument('--mirna', help='target miRNA (e.g. miR-21-5p); homologs are extracted from miRBase')
+    src.add_argument('--input-fa', help='user-supplied multiple sequence FASTA file')
+    parser.add_argument('--mature-fa', help='path to a local miRBase mature.fa (optional)')
     parser.add_argument('--reference-species', default=None,
-                        help='参考物种前缀（如 chi/hsa），用于比对锚点；默认第一个序列')
+                        help='reference species prefix (e.g. chi/hsa) used as the alignment anchor; defaults to the first sequence')
     parser.add_argument('--species', default=None,
-                        help='逗号分隔的物种前缀白名单（如 hsa,chi,bta,mmu）；默认全部')
-    parser.add_argument('--seed-start', type=int, default=2, help='种子区起始 nt（默认 2）')
-    parser.add_argument('--seed-end', type=int, default=8, help='种子区结束 nt（默认 8）')
-    parser.add_argument('--outdir', default='.', help='输出目录（默认当前）')
-    parser.add_argument('--prefix', default='mirna_conservation', help='输出文件前缀')
-    parser.add_argument('--no-plot', action='store_true', help='跳过绘图（仅输出 TSV）')
+                        help='comma-separated allow-list of species prefixes (e.g. hsa,chi,bta,mmu); defaults to all')
+    parser.add_argument('--seed-start', type=int, default=2, help='seed region start nt (default 2)')
+    parser.add_argument('--seed-end', type=int, default=8, help='seed region end nt (default 8)')
+    parser.add_argument('--outdir', default='.', help='output directory (default: current)')
+    parser.add_argument('--prefix', default='mirna_conservation', help='prefix for output files')
+    parser.add_argument('--no-plot', action='store_true', help='skip plotting (TSV output only)')
+    parser.add_argument('--engine', default='auto', choices=['auto', 'r', 'python'],
+                        help='Plotting engine: auto (R when available, else Python), '
+                             'r (ggplot2, default choice), python (matplotlib fallback)')
     args = parser.parse_args()
 
+    args.prefix = safe_prefix(args.prefix)
+    if not str(args.outdir).strip():
+        parser.error('--outdir must not be empty')
     if args.seed_start < 1 or args.seed_end < args.seed_start:
-        print("Error: 种子区参数非法（需 1 <= seed-start <= seed-end）。")
+        print("Error: invalid seed region (required: 1 <= seed-start <= seed-end).")
         sys.exit(1)
 
-    # 获取序列
+    # Obtain sequences
     if args.mirna:
         mature_fa = fetch_mature_fa(args.mature_fa)
         species_filter = set(s.strip() for s in args.species.split(',')) \
             if args.species else None
         records = extract_homologs(mature_fa, args.mirna, species_filter)
         if not records:
-            print(f"Error: 在 miRBase 中未找到 '{args.mirna}' 的同源序列。")
-            print("请检查名称是否正确（如 miR-504-5p，不含物种前缀）。")
+            print(f"Error: no homologs found for '{args.mirna}' in miRBase.")
+            print("Please check the name (e.g. miR-21-5p, without a species prefix).")
             sys.exit(1)
-        print(f"找到 {len(records)} 个物种的同源序列：")
+        print(f"Found homologs in {len(records)} species:")
         for r in records:
             print(f"  {r[0]:>5}  {r[4]}")
     else:
-        # 用户提供 FASTA
+        # User-supplied FASTA
         raw = parse_fasta(args.input_fa)
         records = []
         for header, seq in raw:
@@ -619,11 +762,11 @@ def main():
                 prefix, mirna_id = name_field, 'unknown'
             records.append((prefix, mirna_id, '', '', normalize_rna(seq)))
         if len(records) < 2:
-            print("Error: --input-fa 至少需要 2 条序列。")
+            print("Error: --input-fa requires at least 2 sequences.")
             sys.exit(1)
-        print(f"读取 {len(records)} 条序列。")
+        print(f"Read {len(records)} sequences.")
 
-    # 确定参考序列
+    # Determine the reference sequence
     ref_idx = 0
     if args.reference_species:
         for i, r in enumerate(records):
@@ -631,23 +774,24 @@ def main():
                 ref_idx = i
                 break
         else:
-            print(f"Warning: 未找到参考物种 '{args.reference_species}'，使用第一个序列。")
+            print(f"Warning: reference species '{args.reference_species}' not found; using the first sequence.")
 
     result = run_conservation(
         records, [r[0] for r in records], args.seed_start, args.seed_end,
-        args.outdir, args.prefix, ref_idx=ref_idx, make_plots=not args.no_plot)
+        args.outdir, args.prefix, ref_idx=ref_idx, make_plots=not args.no_plot,
+        engine=args.engine)
 
     print()
-    print("=== 输出文件 ===")
-    print(f"  多序列比对 FASTA : {result['fasta']}")
-    print(f"  位点保守性表     : {result['conservation']}")
-    print(f"  汇总统计表       : {result['summary']}")
+    print("=== Output files ===")
+    print(f"  alignment FASTA     : {result['fasta']}")
+    print(f"  per-position table  : {result['conservation']}")
+    print(f"  summary table       : {result['summary']}")
     if not args.no_plot:
-        print(f"  序列 logo (PNG)  : {os.path.join(args.outdir, args.prefix + '_sequence_logo.png')}")
-        print(f"  序列 logo (SVG)  : {os.path.join(args.outdir, args.prefix + '_sequence_logo.svg')}")
-        print(f"  比对图 (PNG)     : {os.path.join(args.outdir, args.prefix + '_alignment.png')}")
-        print(f"  比对图 (SVG)     : {os.path.join(args.outdir, args.prefix + '_alignment.svg')}")
-    print(f"\n共 {result['num_species']} 个物种，比对长度 {result['width']} nt。")
+        print(f"  sequence logo (PNG) : {os.path.join(args.outdir, args.prefix + '_sequence_logo.png')}")
+        print(f"  sequence logo (SVG) : {os.path.join(args.outdir, args.prefix + '_sequence_logo.svg')}")
+        print(f"  alignment (PNG)     : {os.path.join(args.outdir, args.prefix + '_alignment.png')}")
+        print(f"  alignment (SVG)     : {os.path.join(args.outdir, args.prefix + '_alignment.svg')}")
+    print(f"\n{result['num_species']} species, alignment length {result['width']} nt.")
     print("Done!")
 
 

@@ -7,7 +7,9 @@ Two capabilities:
      gene descriptions via MyGene.info (online API, no local DB required).
   2. Functional enrichment - GO (BP/CC/MF) and KEGG pathway enrichment via the
      g:Profiler REST API (standard-library only, no third-party dependency),
-     supporting human/mouse/rat/sheep/goat/cow.
+     supporting human/mouse/rat/sheep/goat/cow. Every tested term is reported
+     with both its raw p-value and a Benjamini-Hochberg FDR q-value (BH is
+     applied within each source over the full tested family).
 
 Usage examples:
   # From merged targets TSV (column "TargetGene")
@@ -29,7 +31,38 @@ import os
 import sys
 import urllib.request
 
+import numpy as np
 import pandas as pd
+
+MAX_RESPONSE_BYTES = 64 << 20  # g:Profiler responses are far smaller than this
+FORMULA_PREFIXES = ('=', '+', '-', '@', '\t', '\r')
+
+
+def safe_prefix(value):
+    """Reject prefixes that would write outside --output-dir."""
+    text = str(value).strip()
+    if (not text or text in (".", "..")
+            or any(ch in text for ch in ("/", "\\", "\x00", "\n", "\r", "\t"))):
+        raise SystemExit("Error: invalid prefix %r (path separators and control "
+                         "characters are not allowed)" % value)
+    return text
+
+
+def formula_safe(df, enabled=True):
+    """Neutralise spreadsheet formula injection in exported text cells.
+
+    A gene description such as '=HYPERLINK(...)' would be executed by Excel when
+    the TSV is opened. Prefixing the cell with an apostrophe keeps the text
+    literal without changing the underlying value for downstream tools.
+    """
+    if not enabled:
+        return df
+    out = df.copy()
+    for col in out.columns:
+        if pd.api.types.is_string_dtype(out[col].dtype) or out[col].dtype == object:
+            out[col] = out[col].map(
+                lambda v: "'" + v if isinstance(v, str) and v.startswith(FORMULA_PREFIXES) else v)
+    return out
 
 
 # Common name / alias -> (taxid for MyGene.info, organism for g:Profiler)
@@ -145,7 +178,10 @@ def run_enrichment(genes, organism):
         'organism': organism,
         'query': genes,
         'sources': ['GO:BP', 'GO:CC', 'GO:MF', 'KEGG'],
-        'user_threshold': 0.05,
+        # ask for the FULL tested family (no pre-filtering) so the
+        # Benjamini-Hochberg correction below is computed over every term
+        # g:Profiler tested, not just the ones that already looked significant
+        'user_threshold': 1.0,
         'no_evidences': True,
         'no_iea': False,
         'domain_scope': 'annotated',
@@ -159,7 +195,11 @@ def run_enrichment(genes, organism):
             headers={'Content-Type': 'application/json', 'User-Agent': 'mirna-target-tools/1.0'},
         )
         with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            print('Warning: g:Profiler response is unexpectedly large; ignoring it.')
+            return None
+        data = json.loads(raw.decode('utf-8'))
     except Exception as e:
         print(f"Warning: g:Profiler query failed: {e}")
         return None
@@ -184,8 +224,27 @@ def run_enrichment(genes, organism):
         })
 
     df = pd.DataFrame(rows)
-    df = df[df['p_value'] < 0.05].copy()
-    df['neg_log10_p'] = df['p_value'].apply(lambda p: -math.log10(p) if p > 0 else float('inf'))
+    if df.empty:
+        return None
+
+    # Benjamini-Hochberg FDR, computed within each source over *every* term the
+    # API tested (the full family, not just the significant subset) so the
+    # correction stays statistically valid. g:Profiler's own correction
+    # (g:SCS) is deliberately conservative; BH is reported alongside the raw p.
+    df['q_value'] = np.nan
+    for src, idx in df.groupby('source').groups.items():
+        p = df.loc[idx, 'p_value'].to_numpy(dtype=float)
+        m = len(p)
+        order = np.argsort(p)
+        q = p[order] * m / np.arange(1, m + 1)
+        q = np.minimum.accumulate(q[::-1])[::-1]
+        out = np.empty(m)
+        out[order] = q
+        df.loc[idx, 'q_value'] = np.clip(out, 0.0, 1.0)
+
+    df['neg_log10_p'] = df['p_value'].apply(lambda p: -math.log10(p) if p > 0 else float('nan'))
+    df['neg_log10_q'] = df['q_value'].apply(lambda q: -math.log10(q) if q and q > 0 else float('nan'))
+    df['significant'] = (df['p_value'] < 0.05) & (df['q_value'] < 0.05)
     df = df.sort_values('p_value').reset_index(drop=True)
     return df
 
@@ -205,6 +264,8 @@ def main():
                         help='Output directory (default: annotation_results)')
     parser.add_argument('--prefix', default=None,
                         help='Output filename prefix (default: derived from input basename)')
+    parser.add_argument('--no-formula-guard', action='store_true',
+                        help='do not prefix text cells that start with = + - @ (spreadsheet safety)')
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -213,7 +274,8 @@ def main():
 
     taxid, organism = resolve_species(args.species)
     os.makedirs(args.output_dir, exist_ok=True)
-    prefix = args.prefix or os.path.splitext(os.path.basename(args.input))[0]
+    prefix = safe_prefix(args.prefix or os.path.splitext(os.path.basename(args.input))[0])
+    guard = not args.no_formula_guard
 
     genes = load_gene_list(args.input, args.gene_col, args.plain_list)
     print(f"Loaded {len(genes)} unique target genes.")
@@ -221,6 +283,7 @@ def main():
     # 1) Gene annotation
     ann_df = annotate_genes(genes, taxid)
     if ann_df is not None:
+        ann_df = formula_safe(ann_df, guard)
         ann_path = os.path.join(args.output_dir, f"{prefix}_gene_annotation.tsv")
         ann_df.to_csv(ann_path, sep='\t', index=False)
         print(f"Gene annotation written to {ann_path}")
@@ -231,18 +294,22 @@ def main():
     # 2) Functional enrichment
     enrich_df = run_enrichment(genes, organism)
     if enrich_df is not None:
+        enrich_df = formula_safe(enrich_df, guard)
         full_path = os.path.join(args.output_dir, f"{prefix}_enrichment_all.tsv")
         enrich_df.to_csv(full_path, sep='\t', index=False)
         print(f"Enrichment results written to {full_path}")
         if 'source' in enrich_df.columns:
             for src, name in [('GO:BP', 'GO_BP'), ('GO:CC', 'GO_CC'),
                               ('GO:MF', 'GO_MF'), ('KEGG', 'KEGG')]:
-                sub = enrich_df[enrich_df['source'] == src]
+                sub = enrich_df[(enrich_df['source'] == src) & enrich_df['significant']]
                 if len(sub):
                     p = os.path.join(args.output_dir, f"{prefix}_{name}.tsv")
                     sub.to_csv(p, sep='\t', index=False)
-                    print(f"  {src}: {len(sub)} terms -> {os.path.basename(p)}")
-        print(f"  Total enriched terms (p < 0.05): {len(enrich_df)}")
+                    print(f"  {src}: {len(sub)} significant terms -> {os.path.basename(p)}")
+        n_p = int((enrich_df['p_value'] < 0.05).sum())
+        n_q = int(enrich_df['significant'].sum())
+        print(f"  Terms tested: {len(enrich_df)} | p < 0.05: {n_p} | BH q < 0.05: {n_q}")
+        print("  (the *_all.tsv keeps every tested term with its q_value)")
 
     print("Done!")
 
